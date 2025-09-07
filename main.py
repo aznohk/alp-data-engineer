@@ -4,10 +4,12 @@ from transformDataTransaction import get_data_criteria
 from getDataBronze import getDataNasabahRaw, getDataTransactionRaw
 from getDataSilver import getDataCriteria
 from transformDataSilver import transformDataSilver, inserDataTransaction
-# import json
+import os
 import pandas as pd
 import time
 import datetime
+from dotenv import load_dotenv
+
 
 def my_database_connection(db_session):
     if not db_session:
@@ -47,7 +49,10 @@ def main():
                     now = datetime.datetime.now()
                     timestamp_str = now.strftime("%Y%m%d_%H%M%S")
                     fileName = f"silver_transactions_{timestamp_str}.csv"
-                    data_inserted.to_csv(f"{fileName}", index=False)
+                    load_dotenv()
+                    file_path = os.getenv("PATH_FILE_GENERATED")
+                    full_file_path = os.path.join(file_path, fileName)
+                    data_inserted.to_csv(f"{full_file_path}", index=False)
                     print(f"Successfully created {fileName}")
                 # df = pd.DataFrame(list_trx_transform)
                 # df.to_csv('silver_transaction.csv', index=False)

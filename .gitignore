@@ -2,7 +2,8 @@
 .env
 
 #file generated
-.csv
+*.csv
 
 #Directory Cache and Compliance
 __pycache__/
+folder_silver_generated/
