@@ -1,0 +1,8 @@
+#file configurasi
+.env
+
+#file generated
+.csv
+
+#Directory Cache and Compliance
+__pycache__/
