@@ -5,6 +5,7 @@ from getDataBronze import getDataNasabahRaw, getDataTransactionRaw
 from getDataSilver import getDataCriteria
 from transformDataSilver import transformDataSilver, inserDataTransaction
 import os
+from pathlib import Path
 import pandas as pd
 import time
 import datetime
@@ -50,7 +51,11 @@ def main():
                     timestamp_str = now.strftime("%Y%m%d_%H%M%S")
                     fileName = f"silver_transactions_{timestamp_str}.csv"
                     load_dotenv()
+                    # Resolve output directory from env or default to ./generated next to this file
                     file_path = os.getenv("PATH_FILE_GENERATED")
+                    if not file_path or not isinstance(file_path, str):
+                        file_path = str((Path(__file__).resolve().parent / "generated"))
+                    os.makedirs(file_path, exist_ok=True)
                     full_file_path = os.path.join(file_path, fileName)
                     data_inserted.to_csv(f"{full_file_path}", index=False)
                     print(f"Successfully created {fileName}")
