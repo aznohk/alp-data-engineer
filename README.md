@@ -94,9 +94,84 @@ Behavior:
 ### Start/Stop helpers (background)
 
 ```bash
-# Start in background (creates .pipeline.pid and logs to pipeline.out)
-.start_pipeline.sh
+# Start in background (creates .pipeline.pid; logs cleaned on stop)
+./start_pipeline.sh
 
-# Stop background pipeline using PID file
-.stop_pipeline.sh
+# Stop background pipeline (also removes *.log and *.out)
+./stop_pipeline.sh
+```
+
+## Complete Pipeline: Bronze → Silver → Gold
+
+### Quick Start
+
+```bash
+# Run complete pipeline (Bronze → Silver → Gold)
+python run_pipeline_complete.py --mode complete
+
+# Or use the enhanced shell runner (validates, runs periodically)
+./run_pipeline.sh
+```
+
+### Pipeline Manager
+
+```bash
+# Start / Stop / Restart
+./pipeline_manager.sh start
+./pipeline_manager.sh stop
+./pipeline_manager.sh restart
+
+# Status, Logs, Config, Validate
+./pipeline_manager.sh status
+./pipeline_manager.sh logs
+./pipeline_manager.sh config
+./pipeline_manager.sh validate
+```
+
+### Modes
+
+```bash
+# Full pipeline
+python run_pipeline_complete.py --mode complete
+
+# Bronze only
+python run_pipeline_complete.py --mode bronze-only
+
+# Gold only (requires silver data)
+python run_pipeline_complete.py --mode gold-only
+
+# Dry run (validate DB/config)
+python run_pipeline_complete.py --dry-run
+```
+
+### Monitoring & Metrics
+
+```bash
+# Show live status and recent history
+python run_pipeline_complete.py --status
+
+# Logs are written during runs and cleaned on stop
+```
+
+### Configuration
+
+The pipeline uses `pipeline_config.py` for settings (timeouts, batch sizes, layer enable/disable). Environment variables are loaded from `.env`.
+
+## Environment setup (Conda) and dependencies
+
+```bash
+# 1) Create and activate a conda env
+conda create -n alp-de python=3.10 -y
+conda activate alp-de
+
+# 2) Install project dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 3) Configure environment variables
+cp .env.example .env  # if you keep an example file; otherwise create .env
+# then edit .env to match your database settings
+
+# 4) (Optional) Verify pipeline is ready
+python run_pipeline_complete.py --dry-run
 ```
