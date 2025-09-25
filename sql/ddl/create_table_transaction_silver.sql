@@ -1,0 +1,20 @@
+CREATE TABLE silver.transactions (
+	id uuid DEFAULT gen_random_uuid() NOT NULL,
+	account_num varchar(20) NOT NULL,
+	amount int8 NOT NULL,
+	currency varchar(3) NULL,
+	trx_type varchar(1) NOT NULL,
+	account_to varchar(50) NOT NULL,
+	narrative varchar(255) NULL,
+	status_trx varchar(20) NULL,
+	trx_date date NOT NULL,
+	trx_time time NOT NULL,
+	created_date timestamptz DEFAULT now() NULL,
+	created_by varchar(30) DEFAULT 'SYSTEM'::character varying NULL,
+	updated_date timestamptz DEFAULT now() NULL,
+	updated_by varchar(30) DEFAULT 'SYSTEM'::character varying NULL,
+	criteria_anomali varchar(1) NULL,
+	description_anomali varchar(255) NULL,
+	code_transaction varchar(255) NOT NULL,
+	CONSTRAINT transactions_pkey PRIMARY KEY (id)
+);
