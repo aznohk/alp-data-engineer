@@ -145,6 +145,15 @@ class PipelineConfig:
                     "transactions_raw": {"required": True}
                 }
             },
+            "generator": {
+                "enabled": True,
+                "rate_per_minute": 100,
+                "max_transactions": 0,
+                "fraud_ratio": 0.4,
+                "repeat_probability": 0.15,
+                "csv_batch_size": 1,
+                "realtime_db": True
+            },
             "silver": {
                 "enabled": True,
                 "batch_size": 1000,

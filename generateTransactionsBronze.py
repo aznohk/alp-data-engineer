@@ -7,8 +7,8 @@ import psycopg2
 import random
 import string
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from datetime import datetime, timedelta, timezone, date
+from typing import Optional, List, Iterable
 import csv
 import os
 from dotenv import load_dotenv
@@ -17,10 +17,65 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Database connection string
-# DB_CONNECTION = "postgresql://neondb_owner:npg_3TOQ6hZlyKzB@ep-billowing-cherry-a14lnj3s-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-DB_CONNECTION = os.getenv("DB_URL_CONNECTION")
-# DB_CONNECTION = "postgresql://localhost:5432/postgres"
-# DB_CONNECTION = "postgresql://postgres:postgresql@localhost:5432/postgres"
+DB_CONNECTION = "postgresql://neondb_owner:npg_3TOQ6hZlyKzB@ep-billowing-cherry-a14lnj3s-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+# DB_CONNECTION = os.getenv("DB_URL_CONNECTION")
+# CSV output directory (per-day files)
+CSV_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "generated")
+
+# CSV columns order
+CSV_COLUMNS = [
+    'id', 'trx_type', 'account_number', 'amount', 'debit_credit', 'subheader',
+    'detail_information', 'trx_date', 'trx_time', 'currency', 'created_date',
+    'created_by', 'updated_date', 'updated_by'
+]
+
+
+def ensure_csv_dir_exists():
+    if not os.path.isdir(CSV_OUTPUT_DIR):
+        os.makedirs(CSV_OUTPUT_DIR, exist_ok=True)
+
+
+def get_csv_path_for_date(d: date) -> str:
+    ensure_csv_dir_exists()
+    filename = f"transactions_raw_{d.strftime('%Y%m%d')}.csv"
+    return os.path.join(CSV_OUTPUT_DIR, filename)
+
+
+def append_transaction_to_daily_csv(transaction_data: dict, d: Optional[date] = None):
+    """Append a single transaction row to the per-day CSV file, creating header if new file."""
+    if d is None:
+        d = date.today()
+    csv_path = get_csv_path_for_date(d)
+    file_exists = os.path.isfile(csv_path)
+    with open(csv_path, mode='a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({k: transaction_data.get(k) for k in CSV_COLUMNS})
+
+
+def flush_csv_buffer(rows: List[dict], d: Optional[date] = None) -> int:
+    """Write buffered rows to the per-day CSV and clear the buffer. Returns number of rows flushed."""
+    if not rows:
+        return 0
+    if d is None:
+        d = date.today()
+    csv_path = get_csv_path_for_date(d)
+    file_exists = os.path.isfile(csv_path)
+    try:
+        with open(csv_path, mode='a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+            if not file_exists:
+                writer.writeheader()
+            for r in rows:
+                writer.writerow({k: r.get(k) for k in CSV_COLUMNS})
+        flushed = len(rows)
+        rows.clear()
+        return flushed
+    except Exception as e:
+        print(f"Error flushing CSV buffer: {e}")
+        return 0
+
 
 def generate_id(length: int = 22) -> str:
     alphabet = string.ascii_letters + string.digits + "-"
@@ -165,21 +220,51 @@ def load_sender_accounts_from_db() -> List[str]:
     return accounts
 
 
-def insert_transaction_to_db(transaction_data: dict):
-    """Insert a single transaction into the database."""
-    insert_sql = """
-    INSERT INTO bronze.transactions_raw 
-    (id, trx_type, account_number, amount, debit_credit, subheader, 
-     detail_information, trx_date, trx_time, currency, created_date, 
-     created_by, updated_date, updated_by)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO NOTHING;
-    """
-    
+def _batch_insert_transactions_to_db(rows: Iterable[dict]):
+    """Batch insert transactions using ON CONFLICT DO NOTHING for id deduplication."""
+    from psycopg2.extras import execute_values
+    insert_sql = (
+        "INSERT INTO bronze.transactions_raw ("
+        "id, trx_type, account_number, amount, debit_credit, subheader, "
+        "detail_information, trx_date, trx_time, currency, created_date, "
+        "created_by, updated_date, updated_by"
+        ") VALUES %s ON CONFLICT (id) DO NOTHING"
+    )
+    values_template = "(" + ",".join(["%s"] * len(CSV_COLUMNS)) + ")"
     try:
         with psycopg2.connect(DB_CONNECTION) as conn:
             with conn.cursor() as cur:
-                cur.execute(insert_sql, (
+                data = [
+                    (
+                        r['id'], r['trx_type'], r['account_number'], r['amount'], r['debit_credit'],
+                        r['subheader'], r['detail_information'], r['trx_date'], r['trx_time'], r['currency'],
+                        r['created_date'], r['created_by'], r['updated_date'], r['updated_by']
+                    ) for r in rows
+                ]
+                if not data:
+                    return 0
+                execute_values(cur, insert_sql, data, template=values_template, page_size=1000)
+            conn.commit()
+        return len(data)
+    except Exception as e:
+        print(f"Error batch inserting transactions: {e}")
+        return 0
+
+
+def insert_single_transaction_to_db(transaction_data: dict) -> int:
+    """Insert a single transaction immediately (realtime). Returns 1 if attempted."""
+    sql = (
+        "INSERT INTO bronze.transactions_raw ("
+        "id, trx_type, account_number, amount, debit_credit, subheader, "
+        "detail_information, trx_date, trx_time, currency, created_date, "
+        "created_by, updated_date, updated_by) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        "ON CONFLICT (id) DO NOTHING"
+    )
+    try:
+        with psycopg2.connect(DB_CONNECTION) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (
                     transaction_data['id'],
                     transaction_data['trx_type'],
                     transaction_data['account_number'],
@@ -193,11 +278,71 @@ def insert_transaction_to_db(transaction_data: dict):
                     transaction_data['created_date'],
                     transaction_data['created_by'],
                     transaction_data['updated_date'],
-                    transaction_data['updated_by']
+                    transaction_data['updated_by'],
                 ))
                 conn.commit()
+        return 1
     except Exception as e:
-        print(f"Error inserting transaction: {e}")
+        print(f"Error realtime insert: {e}")
+        return 0
+
+
+def ingest_daily_csv_to_db(d: Optional[date] = None) -> int:
+    """
+    Ingest the per-day CSV file into bronze.transactions_raw, skipping existing ids.
+    Returns number of rows attempted (existing rows are skipped by ON CONFLICT).
+    """
+    if d is None:
+        d = date.today()
+    csv_path = get_csv_path_for_date(d)
+    if not os.path.isfile(csv_path):
+        print(f"No CSV found to ingest for {d.isoformat()} at {csv_path}")
+        return 0
+    inserted = 0
+    
+    def _fetch_existing_ids(ids: List[str]) -> set:
+        if not ids:
+            return set()
+        existing: set = set()
+        try:
+            with psycopg2.connect(DB_CONNECTION) as conn:
+                with conn.cursor() as cur:
+                    step = 1000
+                    for i in range(0, len(ids), step):
+                        chunk = ids[i:i+step]
+                        # Build safe IN list
+                        in_list = ",".join(["'" + str(x).replace("'", "''") + "'" for x in chunk])
+                        cur.execute(
+                            f"SELECT id FROM bronze.transactions_raw WHERE id IN ({in_list})"
+                        )
+                        rows = cur.fetchall()
+                        if rows:
+                            existing.update([str(r[0]) for r in rows])
+        except Exception as e:
+            print(f"Warning: could not pre-check existing ids: {e}")
+        return existing
+    try:
+        with open(csv_path, mode='r', newline='') as f:
+            reader = csv.DictReader(f)
+            buffer: List[dict] = []
+            for row in reader:
+                buffer.append(row)
+                if len(buffer) >= 5000:
+                    ids = [str(r['id']) for r in buffer if r.get('id')]
+                    existing_ids = _fetch_existing_ids(ids)
+                    to_insert = [r for r in buffer if str(r.get('id')) not in existing_ids]
+                    inserted += _batch_insert_transactions_to_db(to_insert)
+                    buffer = []
+            if buffer:
+                ids = [str(r['id']) for r in buffer if r.get('id')]
+                existing_ids = _fetch_existing_ids(ids)
+                to_insert = [r for r in buffer if str(r.get('id')) not in existing_ids]
+                inserted += _batch_insert_transactions_to_db(to_insert)
+        print(f"Ingested CSV {os.path.basename(csv_path)} -> inserted {inserted} new row(s); existing ids skipped")
+        return inserted
+    except Exception as e:
+        print(f"Error ingesting CSV {csv_path}: {e}")
+        return 0
 
 
 def run_generator_to_db(
@@ -205,9 +350,14 @@ def run_generator_to_db(
     timezone_offset_minutes: int = 420,
     fraud_ratio: float = 0.05,
     repeat_probability: float = 0.15,
-    max_transactions: Optional[int] = None
+    max_transactions: Optional[int] = None,
+    csv_batch_size: int = 1,
+    realtime_db: bool = True
 ):
-    """Generate transactions and insert directly into database."""
+    """
+    Generate transactions and append them to a per-day CSV. Use ingest_daily_csv_to_db()
+    to load the CSV into the database with deduplication.
+    """
     
     tz = timezone(timedelta(minutes=timezone_offset_minutes))
     fraud = FraudScenarioManager(
@@ -225,8 +375,9 @@ def run_generator_to_db(
     sleep_seconds = max(0.0, 60.0 / max(1, rate_per_minute))
     
     transaction_count = 0
+    csv_buffer: List[dict] = []
     
-    print(f"🚀 Starting transaction generation to database...")
+    print(f"🚀 Starting transaction generation to CSV...")
     print(f"Rate: {rate_per_minute} transactions/minute")
     print(f"Fraud ratio: {fraud_ratio}")
     print(f"Press Ctrl+C to stop")
@@ -284,8 +435,19 @@ def run_generator_to_db(
                 'updated_by': 'SYSTEM'
             }
 
-            # Insert to database
-            insert_transaction_to_db(transaction_data)
+            # CSV write (realtime or batched)
+            if max(1, csv_batch_size) == 1:
+                append_transaction_to_daily_csv(transaction_data)
+            else:
+                csv_buffer.append(transaction_data)
+                if len(csv_buffer) >= max(1, csv_batch_size):
+                    flushed = flush_csv_buffer(csv_buffer)
+                    if flushed:
+                        print(f"Flushed {flushed} rows to daily CSV")
+
+            # Realtime DB insert
+            if realtime_db:
+                insert_single_transaction_to_db(transaction_data)
             transaction_count += 1
 
             # Print progress
@@ -302,7 +464,13 @@ def run_generator_to_db(
             time.sleep(sleep_seconds)
             
     except KeyboardInterrupt:
+        # Flush remaining CSV buffer if any
+        if csv_buffer:
+            flushed = flush_csv_buffer(csv_buffer)
+            if flushed:
+                print(f"Flushed remaining {flushed} rows to daily CSV")
         print(f"\n🛑 Stopped by user. Generated {transaction_count} transactions total.")
+        print("Tip: Run ingest_daily_csv_to_db() to insert today's CSV into DB (skip duplicates).")
     except Exception as e:
         print(f"❌ Error: {e}")
 
@@ -311,11 +479,13 @@ def main():
     """Main function with command line arguments."""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Generate transactions directly to PostgreSQL")
+    parser = argparse.ArgumentParser(description="Generate transactions to CSV and optionally realtime DB")
     parser.add_argument("--rate", type=int, default=60, help="Transactions per minute")
     parser.add_argument("--fraud-ratio", type=float, default=0.25, help="Fraud participation ratio")
     parser.add_argument("--repeat-prob", type=float, default=0.15, help="Repeat beneficiary probability")
     parser.add_argument("--max-transactions", type=int, help="Maximum transactions to generate")
+    parser.add_argument("--csv-batch-size", type=int, default=1, help="CSV write batch size (1 = realtime)")
+    parser.add_argument("--no-realtime-db", action='store_true', help="Disable realtime DB insert")
     
     args = parser.parse_args()
     
@@ -323,7 +493,9 @@ def main():
         rate_per_minute=args.rate,
         fraud_ratio=args.fraud_ratio,
         repeat_probability=args.repeat_prob,
-        max_transactions=args.max_transactions
+        max_transactions=args.max_transactions,
+        csv_batch_size=args.csv_batch_size,
+        realtime_db=not args.no_realtime_db
     )
 
 
