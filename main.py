@@ -4,11 +4,14 @@ from transformDataTransaction import get_data_criteria
 from getDataBronze import getDataNasabahRaw, getDataTransactionRaw
 from getDataSilver import getDataCriteria
 from transformDataSilver import transformDataSilver, inserDataTransaction
-import os
-import pandas as pd
+from transformDataGold import transformDataGold, insertDataGold
+from pipeline_orchestrator import PipelineOrchestrator
 import time
-import datetime
-from dotenv import load_dotenv
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def my_database_connection(db_session):
@@ -25,7 +28,9 @@ def my_database_connection(db_session):
     finally:
         pass
 
-def main():
+
+def run_legacy_pipeline():
+    """Run the original bronze to silver pipeline (legacy mode)"""
     start_time = time.time()
     db_session = get_db_session()
     if db_session:
@@ -36,29 +41,12 @@ def main():
             list_trx_raw = getDataTransactionRaw('bronze', 'transactions_raw')
             criterias = getDataCriteria('silver', 'criteria')
             if list_nasabah_raw is not None and list_trx_raw is not None and criterias is not None :
-                # print("\n--- DataFrame Summary ---")
-                # print(user_df.info())
-                # print("\n--- First 5 rows ---")
-                # print(user_df.head())
-                # print(json.dumps(user_df))
-                # for row in user_df:
-                #     print(row)
                 list_trx_transform = transformDataSilver(list_trx=list_trx_raw, list_nasabah=list_nasabah_raw, list_criteria=criterias)
                 data_inserted = inserDataTransaction(list_trx=list_trx_transform)
                 if not data_inserted.empty:
-                    now = datetime.datetime.now()
-                    timestamp_str = now.strftime("%Y%m%d_%H%M%S")
-                    fileName = f"silver_transactions_{timestamp_str}.csv"
-                    load_dotenv()
-                    file_path = os.getenv("PATH_FILE_GENERATED")
-                    full_file_path = os.path.join(file_path, fileName)
-                    data_inserted.to_csv(f"{full_file_path}", index=False)
-                    print(f"Successfully created {fileName}")
-                # df = pd.DataFrame(list_trx_transform)
-                # df.to_csv('silver_transaction.csv', index=False)
+                    print(f"Successfully processed and inserted {len(data_inserted)} transactions to database")
                 else:
-                    print(f"Nothing data can be generated")
-
+                    print(f"No new data to insert")
             else:
                 print("\nFailed to get DataFrame. Check for errors.")
 
@@ -70,6 +58,51 @@ def main():
             print(f"Execution time : {duration:.4f} seconds")
     else:
         print("Could not get a database session. Exiting")
+
+
+def run_complete_pipeline():
+    """Run the complete bronze to silver to gold pipeline"""
+    logger.info("🚀 Starting Complete Data Pipeline...")
+    orchestrator = PipelineOrchestrator()
+    success = orchestrator.run_complete_pipeline()
+    
+    if success:
+        logger.info("🎯 Complete pipeline finished successfully!")
+        return True
+    else:
+        logger.error("💥 Complete pipeline failed!")
+        return False
+
+
+def main():
+    """Main function with pipeline selection"""
+    import sys
+    
+    # Check command line arguments
+    if len(sys.argv) > 1:
+        mode = sys.argv[1].lower()
+    else:
+        mode = "complete"  # Default to complete pipeline
+    
+    if mode == "legacy":
+        print("🔄 Running Legacy Pipeline (Bronze -> Silver)")
+        run_legacy_pipeline()
+    elif mode == "complete":
+        print("🔄 Running Complete Pipeline (Bronze -> Silver -> Gold)")
+        run_complete_pipeline()
+    elif mode == "gold-only":
+        print("🔄 Running Gold Layer Only")
+        try:
+            normal_data, abnormal_data, summary_data = transformDataGold()
+            insertDataGold(normal_data, "transactions_normal")
+            insertDataGold(abnormal_data, "transactions_abnormal")
+            insertDataGold(summary_data, "transactions_summary")
+            print("✅ Gold layer processing completed!")
+        except Exception as e:
+            print(f"❌ Gold layer processing failed: {e}")
+    else:
+        print("❌ Invalid mode. Use: legacy, complete, or gold-only")
+        print("Usage: python main.py [legacy|complete|gold-only]")
 
 if __name__== "__main__":
     main()

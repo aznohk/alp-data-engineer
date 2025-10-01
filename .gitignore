@@ -7,3 +7,5 @@
 #Directory Cache and Compliance
 __pycache__/
 folder_silver_generated/.DS_Store
+
+*.log
