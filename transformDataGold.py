@@ -93,6 +93,67 @@ def insertDataGold(list_data, table_name):
 
     df_new = df_new[columns_gold]
 
+    # Deduplication against existing gold data
+    try:
+        if table_name != 'transactions_summary':
+            # For normal/abnormal detail tables, dedupe by id
+            if 'id' in df_new.columns and not df_new.empty:
+                ids = df_new['id'].dropna().unique().tolist()
+                if ids:
+                    # Build IN clause safely for Postgres
+                    # Chunk to avoid very large IN lists
+                    existing_ids = set()
+                    chunk_size = 1000
+                    for i in range(0, len(ids), chunk_size):
+                        chunk = ids[i:i+chunk_size]
+                        in_list = ",".join(["'" + str(x).replace("'", "''") + "'" for x in chunk])
+                        query = f"SELECT id FROM gold.{table_name} WHERE id IN ({in_list})"
+                        existing = pd.read_sql_query(query, engine)
+                        if not existing.empty:
+                            existing_ids.update(existing['id'].astype(str).tolist())
+                    if existing_ids:
+                        before = len(df_new)
+                        df_new = df_new[~df_new['id'].astype(str).isin(existing_ids)]
+                        after = len(df_new)
+                        skipped = before - after
+                        if skipped > 0:
+                            print(f"Skip {skipped} duplicate id(s) for {table_name}")
+        else:
+            # For summary table, dedupe by (trx_date, tipe_anomali)
+            if not df_new.empty:
+                keys = df_new[['trx_date','tipe_anomali']].dropna().drop_duplicates()
+                if not keys.empty:
+                    existing_keys = set()
+                    # Query existing per distinct date to keep IN lists small
+                    for trx_date in keys['trx_date'].unique():
+                        tipe_list = keys[keys['trx_date']==trx_date]['tipe_anomali'].unique().tolist()
+                        if not tipe_list:
+                            continue
+                        tipe_in = ",".join(["'" + str(x).replace("'", "''") + "'" for x in tipe_list])
+                        # Cast date appropriately for SQL
+                        query = (
+                            f"SELECT trx_date, tipe_anomali FROM gold.transactions_summary "
+                            f"WHERE trx_date = '{pd.to_datetime(trx_date).date()}' AND tipe_anomali IN ({tipe_in})"
+                        )
+                        existing = pd.read_sql_query(query, engine)
+                        if not existing.empty:
+                            for _, row in existing.iterrows():
+                                existing_keys.add((pd.to_datetime(row['trx_date']).date(), row['tipe_anomali']))
+                    if existing_keys:
+                        before = len(df_new)
+                        # Build mask to exclude existing key pairs
+                        mask = df_new.apply(
+                            lambda r: (pd.to_datetime(r['trx_date']).date(), r['tipe_anomali']) not in existing_keys,
+                            axis=1
+                        )
+                        df_new = df_new[mask]
+                        after = len(df_new)
+                        skipped = before - after
+                        if skipped > 0:
+                            print(f"Skip {skipped} duplicate summary row(s) for {table_name}")
+    except Exception as e:
+        print(f"Warning during deduplication for {table_name}: {e}")
+
     try:
         df_new.to_sql(
             schema='gold',

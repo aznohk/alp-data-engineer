@@ -18,6 +18,7 @@ from getDataBronze import getDataNasabahRaw, getDataTransactionRaw
 from getDataSilver import getDataCriteria
 from transformDataSilver import transformDataSilver, inserDataTransaction
 from transformDataGold import transformDataGold, insertDataGold
+from generateTransactionsBronze import ingest_daily_csv_to_db, run_generator_to_db
 
 # Import monitoring system
 from pipeline_config import config, monitor, PipelineStatus, LayerStatus
@@ -92,6 +93,22 @@ class PipelineOrchestrator:
                 monitor.complete_layer('bronze', 0, 0)
                 return [], []
             
+            # Optional: run generator step to create fraud/normal transactions before ingestion
+            gen_cfg = config.get_layer_config('generator')
+            if gen_cfg.get('enabled', False):
+                try:
+                    logger.info("Generating transactions (pipeline generator step)...")
+                    run_generator_to_db(
+                        rate_per_minute=int(gen_cfg.get('rate_per_minute', 600)),
+                        fraud_ratio=float(gen_cfg.get('fraud_ratio', 0.25)),
+                        repeat_probability=float(gen_cfg.get('repeat_probability', 0.15)),
+                        max_transactions=int(gen_cfg.get('max_transactions', 1000)),
+                        csv_batch_size=int(gen_cfg.get('csv_batch_size', 100)),
+                        realtime_db=bool(gen_cfg.get('realtime_db', True)),
+                    )
+                except Exception as e:
+                    logger.warning(f"Generator step failed/skipped: {e}")
+
             # Get nasabah data
             logger.info("Extracting nasabah data from bronze layer...")
             list_nasabah_raw = getDataNasabahRaw('bronze', 'data_nasabah_raw')
@@ -102,6 +119,16 @@ class PipelineOrchestrator:
                 monitor.complete_layer('bronze', 0, 0, error_msg)
                 return None, None
             
+            # Ingest today's CSV into bronze.transactions_raw (skip existing IDs)
+            try:
+                inserted_attempts = ingest_daily_csv_to_db()
+                if inserted_attempts:
+                    logger.info(f"Ingested today's CSV to bronze.transactions_raw (attempted {inserted_attempts} rows; existing IDs skipped)")
+                else:
+                    logger.info("No CSV to ingest for today or zero rows read")
+            except Exception as e:
+                logger.warning(f"CSV ingestion skipped due to error: {e}")
+
             # Get transaction data
             logger.info("Extracting transaction data from bronze layer...")
             list_trx_raw = getDataTransactionRaw('bronze', 'transactions_raw')

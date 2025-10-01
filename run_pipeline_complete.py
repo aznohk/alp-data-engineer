@@ -7,6 +7,7 @@ Executes the full Bronze -> Silver -> Gold data pipeline with monitoring
 import sys
 import argparse
 import logging
+import time
 from datetime import datetime
 from pipeline_orchestrator import PipelineOrchestrator
 from pipeline_config import config, monitor
@@ -62,28 +63,64 @@ def run_pipeline(mode: str = "complete", dry_run: bool = False) -> bool:
     elif mode == "bronze-only":
         logger.info("🔄 Running Bronze Layer Only")
         try:
+            # Initialize monitoring
+            monitor.start_pipeline(orchestrator.pipeline_id)
+            if not orchestrator.validate_database_connection():
+                monitor.complete_pipeline(False, "Database validation failed")
+                return False
             list_nasabah, list_trx = orchestrator.process_bronze_layer()
-            if list_nasabah is not None and list_trx is not None:
+            success = list_nasabah is not None and list_trx is not None
+            monitor.complete_pipeline(success, None if success else "Bronze layer failed")
+            if success:
                 logger.info("✅ Bronze layer processing completed!")
                 return True
             else:
                 logger.error("❌ Bronze layer processing failed!")
                 return False
         except Exception as e:
+            monitor.complete_pipeline(False, str(e))
             logger.error(f"❌ Bronze layer processing failed: {e}")
             return False
     
     elif mode == "silver-only":
         logger.info("🔄 Running Silver Layer Only")
-        logger.warning("⚠️  Silver-only mode requires bronze data to be available")
-        # This would need bronze data to be pre-loaded
-        logger.error("❌ Silver-only mode not implemented - requires bronze data")
-        return False
+        try:
+            # Initialize monitoring
+            monitor.start_pipeline(orchestrator.pipeline_id)
+            if not orchestrator.validate_database_connection():
+                monitor.complete_pipeline(False, "Database validation failed")
+                return False
+            # Extract bronze as prerequisite for silver
+            list_nasabah, list_trx = orchestrator.process_bronze_layer()
+            if list_nasabah is None or list_trx is None:
+                monitor.complete_pipeline(False, "Bronze extraction failed for silver-only mode")
+                logger.error("❌ Silver-only: bronze extraction failed")
+                return False
+            # Process silver only
+            silver_df = orchestrator.process_silver_layer(list_nasabah, list_trx)
+            success = silver_df is not None
+            monitor.complete_pipeline(success, None if success else "Silver layer failed")
+            if success:
+                logger.info("✅ Silver-only processing completed!")
+                return True
+            else:
+                logger.error("❌ Silver-only processing failed!")
+                return False
+        except Exception as e:
+            monitor.complete_pipeline(False, str(e))
+            logger.error(f"❌ Silver-only mode failed: {e}")
+            return False
     
     elif mode == "gold-only":
         logger.info("🔄 Running Gold Layer Only")
         try:
+            # Initialize monitoring
+            monitor.start_pipeline(orchestrator.pipeline_id)
+            if not orchestrator.validate_database_connection():
+                monitor.complete_pipeline(False, "Database validation failed")
+                return False
             success = orchestrator.process_gold_layer()
+            monitor.complete_pipeline(success, None if success else "Gold layer failed")
             if success:
                 logger.info("✅ Gold layer processing completed!")
                 return True
@@ -91,6 +128,7 @@ def run_pipeline(mode: str = "complete", dry_run: bool = False) -> bool:
                 logger.error("❌ Gold layer processing failed!")
                 return False
         except Exception as e:
+            monitor.complete_pipeline(False, str(e))
             logger.error(f"❌ Gold layer processing failed: {e}")
             return False
     
@@ -191,6 +229,18 @@ Examples:
         help="Enable verbose logging"
     )
     
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Continuously run the pipeline in a loop for near-realtime processing"
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Seconds to wait between runs when --watch is enabled (default: 60)"
+    )
+
     args = parser.parse_args()
     
     # Set logging level
@@ -206,19 +256,28 @@ Examples:
         show_configuration()
         return
     
-    # Run pipeline
+    # Run pipeline (single run or watch loop)
     try:
-        success = run_pipeline(mode=args.mode, dry_run=args.dry_run)
-        
-        if success:
-            logger.info("🎯 Pipeline execution completed successfully!")
-            sys.exit(0)
+        if not args.watch:
+            success = run_pipeline(mode=args.mode, dry_run=args.dry_run)
+            if success:
+                logger.info("🎯 Pipeline execution completed successfully!")
+                sys.exit(0)
+            else:
+                logger.error("💥 Pipeline execution failed!")
+                sys.exit(1)
         else:
-            logger.error("💥 Pipeline execution failed!")
-            sys.exit(1)
+            logger.info(f"👀 Watch mode enabled - Re-running every {args.interval}s. Press Ctrl+C to stop.")
+            while True:
+                success = run_pipeline(mode=args.mode, dry_run=args.dry_run)
+                if success:
+                    logger.info("🎯 Pipeline execution completed successfully!")
+                else:
+                    logger.error("💥 Pipeline execution failed!")
+                time.sleep(max(1, args.interval))
             
     except KeyboardInterrupt:
-        logger.info("🛑 Pipeline execution interrupted by user")
+        logger.info("🛑 Watch mode interrupted by user")
         sys.exit(130)
     except Exception as e:
         logger.error(f"💥 Unexpected error: {e}")

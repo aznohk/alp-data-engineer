@@ -6,21 +6,49 @@ Extract, Transform and Load data silver for detection scam transaction
 1. python
 2. postgresql
 
-# configuration with .env
-1. create file .env
-2. add the configuration variables below and adjust them to those used locally
-DB_HOST={HOST}
-DB_PORT={PORT}
-DB_USER={USER}
-DB_PASSWORD={PASSWORD}
-DB_NAME={DBNAME}
-DB_SSLMODE={require|prefer|disable}  # optional
+## 1) Setup
+```bash
+pip install -r requirements.txt
+cp .env.example .env  # if you have an example; otherwise create .env
+```
 
-# Or provide a full URL instead of the above:
-DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+Minimal .env:
+```env
+DB_HOST=...
+DB_PORT=...
+DB_USER=...
+DB_PASSWORD=...
+DB_NAME=...
+# or DATABASE_URL=postgresql://user:password@host:port/dbname?sslmode=require
+```
 
-# Optional: where silver CSV outputs are written (defaults to ./generated)
-PATH_FILE_GENERATED=/absolute/path/to/output
+Verify setup:
+```bash
+python run_pipeline_complete.py --dry-run
+```
+
+## 2) Run
+
+# Quick usage (TL;DR)
+
+End-to-end (near-realtime):
+```bash
+python run_pipeline_complete.py --mode complete --watch --interval 5
+```
+
+Manual steps:
+```bash
+# Generate (realtime CSV + DB)
+python generateTransactionsBronze.py --rate 100 --fraud-ratio 0.4 --csv-batch-size 1
+# Ingest CSV to bronze (only if you disabled realtime DB)
+python -c "from generateTransactionsBronze import ingest_daily_csv_to_db; ingest_daily_csv_to_db()"
+# Bronze → Silver
+python run_pipeline_complete.py --mode silver-only
+# Silver → Gold
+python run_pipeline_complete.py --mode gold-only
+```
+
+Stop any command with Ctrl+C.
 
 ## How to run the transaction generator (bronze)
 
@@ -31,29 +59,18 @@ Prerequisites:
 - PostgreSQL database reachable from your machine
 - Tables exist: `bronze.data_nasabah_raw` (with `name`, `account_number`, `status='OPENED'`) and `bronze.transactions_raw`
 
-Install dependencies (no virtualenv):
+Install deps (already done in Setup) if needed:
 ```bash
-pip install --upgrade pip
-pip install psycopg2-binary
-```
-
-Conda setup (alternative to venv):
-```bash
-# Create and activate a new conda environment
-conda create -n alp-de python=3.10 -y
-conda activate alp-de
-
-# Install dependencies
-pip install psycopg2-binary
+pip install -r requirements.txt
 ```
 
 Configure database connection:
 - Edit the `DB_CONNECTION` constant at the top of `alp-data-engineer/generateTransactionsBronze.py` to your PostgreSQL URI, for example:
   `postgresql://user:password@host:port/dbname?sslmode=require`
 
-Run examples:
+Quick commands:
 ```bash
-# Default rate (60 tx/min), fraud ratio 0.25, repeat prob 0.15, unlimited until Ctrl+C
+# Default (60 tx/min), fraud 0.25, repeat 0.15, unlimited until Ctrl+C, realtime CSV and DB insert
 python generateTransactionsBronze.py
 
 # Custom rate (120 tx/min) and cap at 1,000 transactions
@@ -61,47 +78,27 @@ python generateTransactionsBronze.py --rate 120 --max-transactions 1000
 
 # Tweak fraud behavior
 python generateTransactionsBronze.py --fraud-ratio 0.3 --repeat-prob 0.2
+
+# CSV batching: flush to CSV every 100 rows (still realtime DB insert by default)
+python generateTransactionsBronze.py --csv-batch-size 100
+
+# CSV only (no realtime DB insert). The pipeline will ingest the CSV later
+python generateTransactionsBronze.py --csv-batch-size 100 --no-realtime-db
 ```
 
 Notes:
+- Daily CSV is written to `generated/transactions_raw_YYYYMMDD.csv` (append if same date).
+- Realtime DB insert uses `ON CONFLICT(id) DO NOTHING` to skip duplicates.
 - Stop with Ctrl+C; progress and basic fraud stats print every 100 rows.
 - If `bronze.data_nasabah_raw` is empty or unreachable, the script falls back to random sender accounts; BNI beneficiaries load may be empty.
 
-## Run full pipeline (bronze -> silver) in parallel
-
-Use the helper script `run_pipeline.sh` to start the bronze generator and execute the silver transformation periodically in parallel.
-
+### Ingest today's CSV into bronze manually
 ```bash
-# Make sure it's executable (already set in repo, but just in case)
-chmod +x run_pipeline.sh
-
-# Run with defaults (120 tx/min, fraud 0.25, repeat 0.15, silver every 30s)
-./run_pipeline.sh
-
-# Override parameters via environment variables
-RATE_PER_MINUTE=200 FRAUD_RATIO=0.3 REPEAT_PROB=0.2 SILVER_INTERVAL_SEC=20 \
-  ./run_pipeline.sh
-
-# Limit total generated transactions (pipeline exits after bronze completes)
-MAX_TRANSACTIONS=1000 ./run_pipeline.sh
+python -c "from generateTransactionsBronze import ingest_daily_csv_to_db; ingest_daily_csv_to_db()"
 ```
+This loads `generated/transactions_raw_YYYYMMDD.csv` into `bronze.transactions_raw`, inserting only IDs that are not present.
 
-Behavior:
-- Bronze generator runs in background, streaming into `bronze.transactions_raw`.
-- Silver job (`alp-data-engineer/main.py`) runs every `SILVER_INTERVAL_SEC` and writes to `silver.transactions` and CSV output per your `.env` (`PATH_FILE_GENERATED`).
-- Script traps Ctrl+C to stop bronze and exit cleanly.
-
-### Start/Stop helpers (background)
-
-```bash
-# Start in background (creates .pipeline.pid; logs cleaned on stop)
-./start_pipeline.sh
-
-# Stop background pipeline (also removes *.log and *.out)
-./stop_pipeline.sh
-```
-
-## Complete Pipeline: Bronze → Silver → Gold
+## 3) Complete Pipeline: Bronze → Silver → Gold
 
 ### Quick Start
 
@@ -109,24 +106,36 @@ Behavior:
 # Run complete pipeline (Bronze → Silver → Gold)
 python run_pipeline_complete.py --mode complete
 
-# Or use the enhanced shell runner (validates, runs periodically)
-./run_pipeline.sh
+# Watch mode (near-realtime): re-run the pipeline every 5 seconds
+python run_pipeline_complete.py --mode complete --watch --interval 5
+
+# Show status / config
+python run_pipeline_complete.py --status
+python run_pipeline_complete.py --config
 ```
 
-### Pipeline Manager
+### Simplest usage
 
+End-to-end (realtime-ish):
 ```bash
-# Start / Stop / Restart
-./pipeline_manager.sh start
-./pipeline_manager.sh stop
-./pipeline_manager.sh restart
-
-# Status, Logs, Config, Validate
-./pipeline_manager.sh status
-./pipeline_manager.sh logs
-./pipeline_manager.sh config
-./pipeline_manager.sh validate
+python run_pipeline_complete.py --mode complete --watch --interval 5
 ```
+
+Steps one-by-one:
+```bash
+# 1) Generate transactions (realtime CSV + DB)
+python generateTransactionsBronze.py --rate 100 --fraud-ratio 0.4 --csv-batch-size 1
+
+# 2) (If CSV-only was used) Ingest today's CSV into bronze
+python -c "from generateTransactionsBronze import ingest_daily_csv_to_db; ingest_daily_csv_to_db()"
+
+# 3) Bronze → Silver only
+python run_pipeline_complete.py --mode silver-only
+
+# 4) Silver → Gold only
+python run_pipeline_complete.py --mode gold-only
+```
+Stop any command with Ctrl+C.
 
 ### Modes
 
@@ -144,34 +153,66 @@ python run_pipeline_complete.py --mode gold-only
 python run_pipeline_complete.py --dry-run
 ```
 
-### Monitoring & Metrics
+#### Pipeline runner parameters
 
 ```bash
-# Show live status and recent history
-python run_pipeline_complete.py --status
+python run_pipeline_complete.py [--mode {complete,bronze-only,silver-only,gold-only}] \
+  [--dry-run] [--status] [--config] [--verbose|-v] \
+  [--watch] [--interval SECONDS]
 
-# Logs are written during runs and cleaned on stop
+# Options:
+# --mode       : Execution mode (default: complete)
+# --dry-run    : Validate DB and config without executing
+# --status     : Show current pipeline status/metrics and exit
+# --config     : Show current pipeline configuration and exit
+# --verbose|-v : Enable verbose logging (DEBUG)
+# --watch      : Continuously re-run the pipeline
+# --interval   : Seconds between runs in watch mode (default: 60)
 ```
+
+#### Generator parameters (standalone)
+
+```bash
+python generateTransactionsBronze.py \
+  [--rate INT] [--fraud-ratio FLOAT] [--repeat-prob FLOAT] \
+  [--max-transactions INT] [--csv-batch-size INT] [--no-realtime-db]
+
+# Options:
+# --rate             : Transactions per minute (default: 60)
+# --fraud-ratio      : Probability a tx participates in fraud pattern (default: 0.25)
+# --repeat-prob      : Probability to reuse a prior beneficiary (default: 0.15)
+# --max-transactions : Stop after N transactions (omit or 0 = unlimited)
+# --csv-batch-size   : Flush to CSV every N rows (1 = realtime)
+# --no-realtime-db   : Disable realtime insert into bronze.transactions_raw
+```
+
+#### Generator parameters (inside pipeline)
+Configured in `pipeline_config.py` (defaults) or override with `pipeline_config.json`:
+
+```json
+{
+  "generator": {
+    "enabled": true,
+    "rate_per_minute": 100,
+    "max_transactions": 0,
+    "fraud_ratio": 0.4,
+    "repeat_probability": 0.15,
+    "csv_batch_size": 1,
+    "realtime_db": true
+  }
+}
+```
+
+Notes: `max_transactions: 0` means unlimited. When enabled, the pipeline will generate, ingest today's CSV, then process silver and gold.
 
 ### Configuration
+The pipeline reads defaults from `pipeline_config.py` and overrides from `pipeline_config.json` (if present). Database settings come from `.env`.
 
-The pipeline uses `pipeline_config.py` for settings (timeouts, batch sizes, layer enable/disable). Environment variables are loaded from `.env`.
+## 4) Deduplication rules
+- Bronze ingestion: skips existing IDs using pre-check and `ON CONFLICT(id) DO NOTHING`.
+- Silver insert: skips already inserted transformed rows (existing project logic).
+- Gold insert:
+  - `transactions_normal` and `transactions_abnormal`: skip if `id` exists.
+  - `transactions_summary`: skip if `(trx_date, tipe_anomali)` exists.
 
-## Environment setup (Conda) and dependencies
-
-```bash
-# 1) Create and activate a conda env
-conda create -n alp-de python=3.10 -y
-conda activate alp-de
-
-# 2) Install project dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 3) Configure environment variables
-cp .env.example .env  # if you keep an example file; otherwise create .env
-# then edit .env to match your database settings
-
-# 4) (Optional) Verify pipeline is ready
-python run_pipeline_complete.py --dry-run
-```
+ 
