@@ -11,7 +11,10 @@ from datetime import datetime, timedelta, timezone, date
 from typing import Optional, List, Iterable
 import csv
 import os
+from dotenv import load_dotenv
 
+
+load_dotenv()
 
 # Database connection string
 DB_CONNECTION = "postgresql://neondb_owner:npg_3TOQ6hZlyKzB@ep-billowing-cherry-a14lnj3s-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
